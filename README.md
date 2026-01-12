@@ -1,0 +1,1 @@
+# Modelos-matem-ticos-en-econom-a-de-los-recursos-naturales
