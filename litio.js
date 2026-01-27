@@ -1,527 +1,500 @@
 // ====================================================================
 // ANÁLISIS COMPLETO DE INDUSTRIALIZACIÓN DEL LITIO - SALAR DE UYUNI
-// Google Earth Engine - JavaScript - VERSIÓN FINAL CORREGIDA
+// Google Earth Engine - JavaScript
 // ====================================================================
 
 // 1. CONFIGURACIÓN INICIAL
 // ====================================================================
 
 // Definir área de estudio: Salar de Uyuni, Bolivia
-var salarUyuni = ee.Geometry.Rectangle([-68.0, -20.5, -67.0, -20.0]);
+var salarUyuni = ee.Geometry.Rectangle([-68.5, -21.0, -66.5, -19.5]);
 
 // Centrar mapa en el área de estudio
-Map.centerObject(salarUyuni, 10);
+Map.centerObject(salarUyuni, 9);
 Map.addLayer(salarUyuni, {color: 'red'}, 'Área de estudio: Salar de Uyuni');
 
-print('Iniciando análisis del Salar de Uyuni...');
-
-// 2. CARGA DE DATOS SATELITALES SIMPLIFICADA
+// 2. CARGA DE DATOS SATELITALES
 // ====================================================================
 
-print('Cargando datos satelitales...');
-
-// Usar Landsat 8 para NDWI (más confiable que Sentinel-2 para esta área)
-var landsat = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+// 2.1 Sentinel-2 para análisis de agua/salmueras
+var sentinel2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
   .filterBounds(salarUyuni)
   .filterDate('2020-01-01', '2023-12-31')
-  .filter(ee.Filter.lt('CLOUD_COVER', 20));
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+  .select(['B3', 'B8']);
 
-// 3. CALCULAR NDWI CON LANDSAT 8
-// ====================================================================
-
-function calcularNDWI_Landsat(image) {
-  // Bandas de Landsat 8: B3 (verde), B5 (NIR)
-  var ndwi = image.normalizedDifference(['SR_B3', 'SR_B5']).rename('NDWI');
-  // Escalar a reflectancia
-  var scaled = image.multiply(0.0000275).add(-0.2);
-  return scaled.addBands(ndwi);
-}
-
-var landsatConNDWI = landsat.map(calcularNDWI_Landsat);
-
-// 4. DATOS MODIS SIMPLIFICADOS
-// ====================================================================
-
-// Temperatura MODIS con proyección fija
+// 2.2 MODIS para temperatura superficial
 var modisLST = ee.ImageCollection('MODIS/061/MOD11A1')
   .filterBounds(salarUyuni)
   .filterDate('2020-01-01', '2023-12-31')
-  .select('LST_Day_1km')
-  .map(function(image) {
-    return image.multiply(0.02).subtract(273.15)
-      .rename('LST_Celsius')
-      .setDefaultProjection('EPSG:4326', null, 1000);
-  });
+  .select('LST_Day_1km');
 
-// 5. CALCULAR PROMEDIOS CORRECTAMENTE
+// 2.3 MODIS para evapotranspiración
+var modisET = ee.ImageCollection('MODIS/006/MOD16A2')
+  .filterBounds(salarUyuni)
+  .filterDate('2020-01-01', '2023-12-31')
+  .select('ET');
+
+// 3. PROCESAMIENTO Y CÁLCULO DE VARIABLES
 // ====================================================================
 
-print('Calculando promedios...');
+// 3.1 Calcular NDWI (Índice Diferencial de Agua Normalizado)
+function calcularNDWI(image) {
+  var ndwi = image.normalizedDifference(['B3', 'B8']).rename('NDWI');
+  return image.addBands(ndwi);
+}
 
-// NDWI promedio - método directo sin reduceResolution
-var ndwiPromedio = landsatConNDWI.select('NDWI').mean()
-  .clip(salarUyuni);
+var sentinel2ConNDWI = sentinel2.map(calcularNDWI);
 
-// LST promedio
-var lstPromedio = modisLST.select('LST_Celsius').mean()
-  .clip(salarUyuni);
+// 3.2 Convertir temperatura de Kelvin a Celsius
+function convertirLST(image) {
+  var lstCelsius = image.multiply(0.02).subtract(273.15).rename('LST_Celsius');
+  return image.addBands(lstCelsius);
+}
 
-// 6. VISUALIZACIÓN EN EL MAPA CORREGIDA
+var modisLSTcelsius = modisLST.map(convertirLST);
+
+// 3.3 Calcular promedios anuales
+var ndwiPromedio = sentinel2ConNDWI.select('NDWI').mean().clip(salarUyuni);
+var lstPromedio = modisLSTcelsius.select('LST_Celsius').mean().clip(salarUyuni);
+var etPromedio = modisET.select('ET').mean().clip(salarUyuni);
+
+// 4. VISUALIZACIÓN EN EL MAPA
 // ====================================================================
 
 // Configurar paletas de colores
-var paletaNDWI = ['red', 'yellow', 'green', 'blue', 'darkblue'];
+var paletaNDWI = ['red', 'yellow', 'green', 'blue'];
 var paletaLST = ['blue', 'cyan', 'green', 'yellow', 'red'];
+var paletaET = ['white', 'cyan', 'blue', 'purple'];
 
 // Añadir capas al mapa
-Map.addLayer(ndwiPromedio, 
-  {min: -0.3, max: 0.3, palette: paletaNDWI}, 
-  'NDWI - Agua/Salmueras');
+Map.addLayer(ndwiPromedio, {min: -0.5, max: 0.5, palette: paletaNDWI}, 'NDWI - Agua/Salmueras');
+Map.addLayer(lstPromedio, {min: 0, max: 30, palette: paletaLST}, 'Temperatura (°C)');
+Map.addLayer(etPromedio, {min: 0, max: 300, palette: paletaET}, 'Evapotranspiración');
 
-Map.addLayer(lstPromedio, 
-  {min: 10, max: 35, palette: paletaLST}, 
-  'Temperatura (°C)');
-
-print('Capas visualizadas en el mapa.');
-
-// 7. EXTRACCIÓN DE VALORES CON CALLBACKS CORREGIDOS
+// 5. EXTRACCIÓN DE VALORES PARA EL MODELO
 // ====================================================================
 
-print('Extrayendo valores ambientales...');
-
-// Función simplificada para extraer valores
-function extraerValor(imagen, banda) {
-  return imagen.select(banda).reduceRegion({
+// Función para extraer valores promedio de la región
+function extraerValoresRegion(imagen, banda) {
+  var estadisticas = imagen.reduceRegion({
     reducer: ee.Reducer.mean(),
     geometry: salarUyuni,
-    scale: 100,
-    maxPixels: 1e9,
-    bestEffort: true
-  }).get(banda);
+    scale: 1000,
+    maxPixels: 1e9
+  });
+  return estadisticas.get(banda);
 }
 
-// Usar evaluate para obtener valores de forma asíncrona
-extraerValor(ndwiPromedio, 'NDWI').evaluate(function(ndwiValor) {
-  extraerValor(lstPromedio, 'LST_Celsius').evaluate(function(lstValor) {
-    
-    print('Valores ambientales extraídos:');
-    print('NDWI (agua/salmueras):', ndwiValor);
-    print('Temperatura (°C):', lstValor);
-    
-    // Manejar valores undefined
-    if (ndwiValor === null || ndwiValor === undefined) {
-      ndwiValor = -0.15; // Valor por defecto basado en datos típicos
-    }
-    
-    if (lstValor === null || lstValor === undefined) {
-      lstValor = 23.7; // Valor por defecto basado en datos típicos
-    }
-    
-    // Calcular factores ambientales
-    var factorNDWI = (ndwiValor + 0.3) / 0.6; // Normalizar a ~0-1
-    var factorTemperatura = lstValor / 35; // Normalizar a 0-1
-    
-    // Asegurar rangos razonables
-    factorNDWI = Math.max(0.1, Math.min(0.9, factorNDWI));
-    factorTemperatura = Math.max(0.3, Math.min(0.9, factorTemperatura));
-    var factorEvaporacion = 0.7; // Valor fijo para simulación
-    
-    print('\nFactores ambientales normalizados:');
-    print('Factor NDWI:', factorNDWI.toFixed(3));
-    print('Factor Temperatura:', factorTemperatura.toFixed(3));
-    print('Factor Evaporación:', factorEvaporacion.toFixed(3));
-    
-    // Ejecutar el modelo con los valores obtenidos
-    ejecutarModeloCompleto(factorNDWI, factorTemperatura, factorEvaporacion);
-    
-  });
-});
+// Extraer valores ambientales
+var ndwiValor = extraerValoresRegion(ndwiPromedio, 'NDWI');
+var lstValor = extraerValoresRegion(lstPromedio, 'LST_Celsius');
+var etValor = extraerValoresRegion(etPromedio, 'ET');
 
-// 8. MODELO DINÁMICO DE PRODUCCIÓN DE LITIO (FUNCIÓN PRINCIPAL)
+// Imprimir valores
+print('Valores ambientales extraídos:');
+print('NDWI (agua/salmueras):', ndwiValor);
+print('Temperatura (°C):', lstValor);
+print('Evapotranspiración:', etValor);
+
+// 6. CONSTRUCCIÓN DE SERIES TEMPORALES
 // ====================================================================
 
-function ejecutarModeloCompleto(factorNDWI, factorTemperatura, factorEvaporacion) {
+// Función para crear serie temporal mensual
+function crearSerieMensual(coleccion, banda, nombre) {
+  var listaMeses = ee.List.sequence(1, 12);
+  var listaAños = ee.List.sequence(2020, 2023);
   
-  print('\n=== INICIANDO MODELO DINÁMICO DE PRODUCCIÓN ===');
+  var serie = ee.ImageCollection.fromImages(
+    listaAños.map(function(año) {
+      return listaMeses.map(function(mes) {
+        var inicio = ee.Date.fromYMD(año, mes, 1);
+        var fin = inicio.advance(1, 'month');
+        
+        var imagenMensual = coleccion
+          .filterDate(inicio, fin)
+          .mean()
+          .set({
+            'year': año,
+            'month': mes,
+            'system:time_start': inicio.millis()
+          });
+        
+        return imagenMensual;
+      });
+    }).flatten()
+  );
   
-  // Parámetros del modelo (valores realistas para Salar de Uyuni)
-  var parametros = {
-    capacidadExtraccion: 150000,    // ton/año de salmuera
-    eficienciaExtraccion: 0.75,     // eficiencia en extracción de Li
-    concentracionLi: 0.17,          // 0.17% concentración típica en Uyuni
-    precioCarbonatoLi: 22000,       // USD/ton (precio actual)
-    precioBateriasLi: 160000,       // USD/ton de baterías
-    costoExtraccion: 6000,          // USD/ton de Li
-    inversionIndustrializacion: 800000000,  // USD para planta completa
-    factorAmbientalBase: factorNDWI * factorTemperatura * factorEvaporacion
+  return serie.select([banda], [nombre]);
+}
+
+// Crear series temporales
+var serieNDWI = crearSerieMensual(sentinel2ConNDWI, 'NDWI', 'NDWI');
+var serieLST = crearSerieMensual(modisLSTcelsius, 'LST_Celsius', 'LST');
+var serieET = crearSerieMensual(modisET, 'ET', 'ET');
+
+// 7. GRÁFICOS DE SERIES TEMPORALES
+// ====================================================================
+
+// Gráfico de NDWI
+var chartNDWI = ui.Chart.image.series({
+  imageCollection: serieNDWI,
+  region: salarUyuni,
+  reducer: ee.Reducer.mean(),
+  scale: 1000
+}).setOptions({
+  title: 'Serie Temporal NDWI - Salar de Uyuni',
+  vAxis: {title: 'NDWI'},
+  hAxis: {title: 'Fecha'},
+  lineWidth: 2,
+  colors: ['blue']
+});
+
+// Gráfico de temperatura
+var chartLST = ui.Chart.image.series({
+  imageCollection: serieLST,
+  region: salarUyuni,
+  reducer: ee.Reducer.mean(),
+  scale: 1000
+}).setOptions({
+  title: 'Serie Temporal Temperatura - Salar de Uyuni',
+  vAxis: {title: 'Temperatura (°C)'},
+  hAxis: {title: 'Fecha'},
+  lineWidth: 2,
+  colors: ['red']
+});
+
+// Mostrar gráficos
+print(chartNDWI);
+print(chartLST);
+
+// 8. MODELO DINÁMICO DE PRODUCCIÓN DE LITIO
+// ====================================================================
+
+// Parámetros del modelo (valores de ejemplo)
+var parametros = {
+  // Capacidades productivas
+  capacidadExtraccion: 100000,  // ton/año
+  eficienciaExtraccion: 0.8,
+  concentracionLi: 0.15,        // 0.15%
+  
+  // Factores económicos
+  precioCarbonatoLi: 20000,     // USD/ton
+  precioBateriasLi: 150000,     // USD/ton
+  costoExtraccion: 5000,        // USD/ton
+  
+  // Inversión requerida
+  inversionIndustrializacion: 500000000,  // USD
+  
+  // Factores ambientales (se actualizarán con datos satelitales)
+  factorNDWI: 0,
+  factorTemperatura: 0,
+  factorEvaporacion: 0
+};
+
+// Obtener valores reales de los factores ambientales
+parametros.factorNDWI = ee.Number(ndwiValor).add(0.5).getInfo();
+parametros.factorTemperatura = ee.Number(lstValor).divide(30).getInfo();
+parametros.factorEvaporacion = ee.Number(etValor).divide(300).getInfo();
+
+// Asegurar que los factores estén en rango [0, 1]
+parametros.factorNDWI = Math.max(0, Math.min(1, parametros.factorNDWI));
+parametros.factorTemperatura = Math.max(0, Math.min(1, parametros.factorTemperatura));
+parametros.factorEvaporacion = Math.max(0, Math.min(1, parametros.factorEvaporacion));
+
+print('Factores ambientales normalizados:');
+print('Factor NDWI:', parametros.factorNDWI);
+print('Factor Temperatura:', parametros.factorTemperatura);
+print('Factor Evaporación:', parametros.factorEvaporacion);
+
+// 9. FUNCIÓN DEL MODELO DINÁMICO
+// ====================================================================
+
+function calcularProduccionAnual(año, escenario) {
+  // Ecuación en diferencias para la producción
+  var extraccionBase = parametros.capacidadExtraccion * 
+    parametros.factorEvaporacion * 
+    parametros.factorTemperatura;
+  
+  var litioExtraido = extraccionBase * 
+    parametros.concentracionLi * 
+    parametros.eficienciaExtraccion;
+  
+  // Resultados base
+  var resultado = {
+    año: año,
+    litioExtraido: litioExtraido,
+    extraccionBase: extraccionBase
   };
   
-  print('Parámetros del modelo establecidos');
-  print('Factor ambiental base:', parametros.factorAmbientalBase.toFixed(3));
-  
-  // 9. FUNCIÓN DE PRODUCCIÓN ANUAL
-  // ====================================================================
-  
-  function calcularProduccionAnual(año, escenario) {
-    // Ecuación en diferencias para producción
-    var extraccionBase = parametros.capacidadExtraccion * 
-      parametros.factorAmbientalBase * 
-      (1 + 0.05 * Math.sin((año - 1) * Math.PI / 3)); // Variación estacional
+  // Escenarios de industrialización
+  if (escenario === 'materiaPrima') {
+    // Exportación de carbonato de litio
+    resultado.ingresos = litioExtraido * parametros.precioCarbonatoLi;
+    resultado.costos = litioExtraido * parametros.costoExtraccion;
+    resultado.ganancia = resultado.ingresos - resultado.costos;
+    resultado.empleos = litioExtraido * 0.01;  // 1 empleo por cada 100 ton
+    resultado.rentaTecnologica = 1.0;  // Índice base
+    resultado.valorAgregado = resultado.ganancia;
     
-    var litioExtraido = extraccionBase * 
-      parametros.concentracionLi * 
-      parametros.eficienciaExtraccion;
+  } else if (escenario === 'industrializacion') {
+    // Producción local de baterías
+    var factorEscala = Math.min(1, año / 5);  // Curva de aprendizaje
     
-    // Resultados base
-    var resultado = {
-      año: año,
-      litioExtraido: litioExtraido
-    };
-    
-    // Escenarios de industrialización
-    if (escenario === 'materiaPrima') {
-      // Exportación de carbonato de litio
-      resultado.ingresos = litioExtraido * parametros.precioCarbonatoLi;
-      resultado.costos = litioExtraido * parametros.costoExtraccion;
-      resultado.ganancia = resultado.ingresos - resultado.costos;
-      resultado.empleos = litioExtraido * 0.015;  // 1.5 empleos por cada 100 ton
-      resultado.rentaTecnologica = 1.0;  // Índice base
-      resultado.valorAgregado = resultado.ganancia;
-      
-    } else if (escenario === 'industrializacion') {
-      // Producción local de baterías
-      var factorEscala = Math.min(1, (año - 1) / 4);  // Curva de aprendizaje (4 años)
-      var inversionAnual = parametros.inversionIndustrializacion * 
-        (0.2 - 0.05 * factorEscala);  // Inversión decreciente
-      
-      resultado.ingresos = litioExtraido * parametros.precioBateriasLi * 
-        (0.5 + 0.5 * factorEscala);
-      resultado.costos = litioExtraido * parametros.costoExtraccion * 2 + inversionAnual;
-      resultado.ganancia = resultado.ingresos - resultado.costos;
-      resultado.empleos = litioExtraido * 0.06 * (0.5 + 0.5 * factorEscala);
-      resultado.rentaTecnologica = 1.0 + 2.5 * factorEscala;
-      resultado.valorAgregado = resultado.ganancia * (1 + factorEscala);
-    }
-    
-    // Impactos ambientales
-    resultado.consumoAgua = litioExtraido * 450;  // m³ por tonelada
-    resultado.emisionesCO2 = litioExtraido * (escenario === 'materiaPrima' ? 4.5 : 7.5);
-    resultado.impactoAmbiental = resultado.consumoAgua * 0.001 + resultado.emisionesCO2 * 0.15;
-    
-    return resultado;
+    resultado.ingresos = litioExtraido * parametros.precioBateriasLi * factorEscala;
+    resultado.costos = litioExtraido * parametros.costoExtraccion * 1.5 + 
+                      (parametros.inversionIndustrializacion / 10);
+    resultado.ganancia = resultado.ingresos - resultado.costos;
+    resultado.empleos = litioExtraido * 0.05 * factorEscala;  // 5 empleos por cada 100 ton
+    resultado.rentaTecnologica = 3.0 * factorEscala;  // Mayor valor tecnológico
+    resultado.valorAgregado = resultado.ganancia * 1.5;
   }
   
-  // 10. SIMULACIÓN DE 10 AÑOS
-  // ====================================================================
+  // Impactos ambientales
+  resultado.consumoAgua = litioExtraido * 500;  // m³ por tonelada
+  resultado.emisionesCO2 = litioExtraido * (escenario === 'materiaPrima' ? 5 : 8);
+  resultado.impactoAmbiental = resultado.consumoAgua * 0.001 + resultado.emisionesCO2 * 0.1;
   
-  print('Simulando 10 años de producción...');
-  
-  var añosSimulacion = 10;
-  var resultadosMP = [];  // Materia prima
-  var resultadosIN = [];  // Industrialización
-  
-  for (var año = 1; año <= añosSimulacion; año++) {
-    resultadosMP.push(calcularProduccionAnual(año, 'materiaPrima'));
-    resultadosIN.push(calcularProduccionAnual(año, 'industrializacion'));
-  }
-  
-  // 11. CÁLCULO DE INDICADORES
-  // ====================================================================
-  
-  function calcularIndicadores(resultados) {
-    var indicadores = {
-      gananciaTotal: 0,
-      empleosTotales: 0,
-      rentaTecnologicaPromedio: 0,
-      litioTotal: 0,
-      impactoAmbientalTotal: 0
-    };
-    
-    for (var i = 0; i < resultados.length; i++) {
-      var r = resultados[i];
-      indicadores.gananciaTotal += r.ganancia;
-      indicadores.empleosTotales += r.empleos;
-      indicadores.rentaTecnologicaPromedio += r.rentaTecnologica;
-      indicadores.litioTotal += r.litioExtraido;
-      indicadores.impactoAmbientalTotal += r.impactoAmbiental;
-    }
-    
-    indicadores.rentaTecnologicaPromedio /= resultados.length;
-    indicadores.gananciaPorTonelada = indicadores.gananciaTotal / indicadores.litioTotal;
-    
-    return indicadores;
-  }
-  
-  var indicadoresMP = calcularIndicadores(resultadosMP);
-  var indicadoresIN = calcularIndicadores(resultadosIN);
-  
-  // 12. MOSTRAR RESULTADOS EN TABLA
-  // ====================================================================
-  
-  print('\n=== RESULTADOS DE SIMULACIÓN (10 AÑOS) ===\n');
-  
-  // Crear tabla de resultados
-  var tabla = [
-    ['Indicador', 'Materia Prima', 'Industrialización'],
-    ['Ganancia Total (M USD)', 
-     (indicadoresMP.gananciaTotal / 1e6).toFixed(1),
-     (indicadoresIN.gananciaTotal / 1e6).toFixed(1)],
-    ['Empleos Generados', 
-     Math.round(indicadoresMP.empleosTotales),
-     Math.round(indicadoresIN.empleosTotales)],
-    ['Renta Tecnológica (índice)', 
-     indicadoresMP.rentaTecnologicaPromedio.toFixed(2),
-     indicadoresIN.rentaTecnologicaPromedio.toFixed(2)],
-    ['Litio Extraído (mil ton)', 
-     (indicadoresMP.litioTotal / 1000).toFixed(1),
-     (indicadoresIN.litioTotal / 1000).toFixed(1)],
-    ['Impacto Ambiental (índice)', 
-     (indicadoresMP.impactoAmbientalTotal / 1000).toFixed(3),
-     (indicadoresIN.impactoAmbientalTotal / 1000).toFixed(3)],
-    ['Ganancia por Tonelada (USD/ton)', 
-     Math.round(indicadoresMP.gananciaPorTonelada),
-     Math.round(indicadoresIN.gananciaPorTonelada)]
-  ];
-  
-  print(ui.Chart({
-    chartType: 'Table',
-    data: tabla
-  }));
-  
-  // 13. GRÁFICOS SIMPLIFICADOS
-  // ====================================================================
-  
-  // Preparar datos para gráficos
-  var años = [];
-  var gananciasMP = [];
-  var gananciasIN = [];
-  var empleosMP = [];
-  var empleosIN = [];
-  
-  for (var i = 0; i < añosSimulacion; i++) {
-    años.push('A' + (i + 1));
-    gananciasMP.push(resultadosMP[i].ganancia / 1e6);
-    gananciasIN.push(resultadosIN[i].ganancia / 1e6);
-    empleosMP.push(resultadosMP[i].empleos);
-    empleosIN.push(resultadosIN[i].empleos);
-  }
-  
-  // Gráfico de ganancias
-  var datosGanancias = {
-    labels: años,
-    datasets: [
-      {
-        label: 'Materia Prima',
-        values: gananciasMP
-      },
-      {
-        label: 'Industrialización',
-        values: gananciasIN
-      }
-    ]
+  return resultado;
+}
+
+// 10. SIMULACIÓN DE ESCENARIOS
+// ====================================================================
+
+// Simular 10 años de producción
+var añosSimulacion = 10;
+var resultadosMP = [];  // Materia prima
+var resultadosIN = [];  // Industrialización
+
+for (var año = 1; año <= añosSimulacion; año++) {
+  resultadosMP.push(calcularProduccionAnual(año, 'materiaPrima'));
+  resultadosIN.push(calcularProduccionAnual(año, 'industrializacion'));
+}
+
+// 11. CÁLCULO DE INDICADORES
+// ====================================================================
+
+function calcularIndicadores(resultados) {
+  var indicadores = {
+    gananciaTotal: 0,
+    empleosTotales: 0,
+    rentaTecnologicaPromedio: 0,
+    litioTotal: 0,
+    impactoAmbientalTotal: 0
   };
   
-  var chartGanancias = ui.Chart(datosGanancias, 'LineChart', {
-    title: 'Evolución de Ganancias (Millones USD)',
-    hAxis: {title: 'Año'},
-    vAxis: {title: 'Ganancia (M USD)'},
-    lineWidth: 2,
-    pointSize: 3,
-    colors: ['orange', 'green']
+  resultados.forEach(function(r) {
+    indicadores.gananciaTotal += r.ganancia;
+    indicadores.empleosTotales += r.empleos;
+    indicadores.rentaTecnologicaPromedio += r.rentaTecnologica;
+    indicadores.litioTotal += r.litioExtraido;
+    indicadores.impactoAmbientalTotal += r.impactoAmbiental;
   });
   
-  // Gráfico de empleos
-  var datosEmpleos = {
-    labels: años,
-    datasets: [
-      {
-        label: 'Materia Prima',
-        values: empleosMP
-      },
-      {
-        label: 'Industrialización',
-        values: empleosIN
-      }
-    ]
-  };
+  indicadores.rentaTecnologicaPromedio /= resultados.length;
+  indicadores.gananciaPorTonelada = indicadores.gananciaTotal / indicadores.litioTotal;
   
-  var chartEmpleos = ui.Chart(datosEmpleos, 'ColumnChart', {
-    title: 'Empleos Generados por Año',
+  return indicadores;
+}
+
+var indicadoresMP = calcularIndicadores(resultadosMP);
+var indicadoresIN = calcularIndicadores(resultadosIN);
+
+// 12. VISUALIZACIÓN DE RESULTADOS
+// ====================================================================
+
+print('\n=== RESULTADOS DE SIMULACIÓN (10 AÑOS) ===\n');
+
+print('ESCENARIO: MATERIA PRIMA');
+print('Ganancia Total: $' + (indicadoresMP.gananciaTotal / 1e6).toFixed(2) + ' M USD');
+print('Empleos Generados: ' + Math.round(indicadoresMP.empleosTotales));
+print('Renta Tecnológica: ' + indicadoresMP.rentaTecnologicaPromedio.toFixed(2));
+print('Litio Extraído: ' + Math.round(indicadoresMP.litioTotal) + ' ton');
+print('Impacto Ambiental: ' + indicadoresMP.impactoAmbientalTotal.toFixed(2));
+
+print('\nESCENARIO: INDUSTRIALIZACIÓN');
+print('Ganancia Total: $' + (indicadoresIN.gananciaTotal / 1e6).toFixed(2) + ' M USD');
+print('Empleos Generados: ' + Math.round(indicadoresIN.empleosTotales));
+print('Renta Tecnológica: ' + indicadoresIN.rentaTecnologicaPromedio.toFixed(2));
+print('Litio Extraído: ' + Math.round(indicadoresIN.litioTotal) + ' ton');
+print('Impacto Ambiental: ' + indicadoresIN.impactoAmbientalTotal.toFixed(2));
+
+// 13. GRÁFICOS COMPARATIVOS
+// ====================================================================
+
+// Crear tabla de datos para gráfico de ganancias
+var datosGananciasArray = [['Año', 'Materia Prima', 'Industrialización']];
+for (var i = 0; i < añosSimulacion; i++) {
+  datosGananciasArray.push([
+    'Año ' + (i + 1),
+    resultadosMP[i].ganancia / 1e6,
+    resultadosIN[i].ganancia / 1e6
+  ]);
+}
+
+var chartGanancias = ui.Chart(datosGananciasArray)
+  .setChartType('LineChart')
+  .setOptions({
+    title: 'Evolución de Ganancias por Escenario',
+    hAxis: {title: 'Año'},
+    vAxis: {title: 'Ganancia (Millones USD)'},
+    lineWidth: 3,
+    colors: ['orange', 'green']
+  });
+
+// Crear tabla de datos para gráfico de empleos
+var datosEmpleosArray = [['Año', 'Materia Prima', 'Industrialización']];
+for (var i = 0; i < añosSimulacion; i++) {
+  datosEmpleosArray.push([
+    'Año ' + (i + 1),
+    resultadosMP[i].empleos,
+    resultadosIN[i].empleos
+  ]);
+}
+
+var chartEmpleos = ui.Chart(datosEmpleosArray)
+  .setChartType('ColumnChart')
+  .setOptions({
+    title: 'Empleos Generados por Escenario',
     hAxis: {title: 'Año'},
     vAxis: {title: 'Número de Empleos'},
     isStacked: false,
     colors: ['orange', 'green']
   });
+
+print('\nGráficos Comparativos:');
+print(chartGanancias);
+print(chartEmpleos);
+
+// 14. ANÁLISIS DE SOSTENIBILIDAD
+// ====================================================================
+
+print('\n=== ANÁLISIS DE SOSTENIBILIDAD ===\n');
+
+// Calcular índices de sostenibilidad
+function calcularSostenibilidad(indicadores) {
+  var sostenibilidad = {
+    economica: indicadores.gananciaPorTonelada / 10000,
+    social: indicadores.empleosTotales / 1000,
+    ambiental: 1 / (indicadores.impactoAmbientalTotal / 100),
+    tecnologica: indicadores.rentaTecnologicaPromedio / 3
+  };
   
-  print('\n=== GRÁFICOS DE RESULTADOS ===\n');
-  print(chartGanancias);
-  print(chartEmpleos);
+  // Normalizar a escala 0-1
+  Object.keys(sostenibilidad).forEach(function(key) {
+    sostenibilidad[key] = Math.min(1, Math.max(0, sostenibilidad[key]));
+  });
   
-  // 14. ANÁLISIS DE SOSTENIBILIDAD
-  // ====================================================================
+  sostenibilidad.total = (sostenibilidad.economica + 
+                         sostenibilidad.social + 
+                         sostenibilidad.ambiental + 
+                         sostenibilidad.tecnologica) / 4;
   
-  print('\n=== ANÁLISIS DE SOSTENIBILIDAD ===\n');
-  
-  function calcularIndiceSostenibilidad(indicadores) {
-    // Normalizar indicadores a escala 0-1
-    var economico = Math.min(1, indicadores.gananciaTotal / 5e9);
-    var social = Math.min(1, indicadores.empleosTotales / 5000);
-    var ambiental = Math.max(0, 1 - (indicadores.impactoAmbientalTotal / 10000));
-    var tecnologico = Math.min(1, indicadores.rentaTecnologicaPromedio / 3);
-    
-    return {
-      economico: economico,
-      social: social,
-      ambiental: ambiental,
-      tecnologico: tecnologico,
-      total: (economico + social + ambiental + tecnologico) / 4
-    };
-  }
-  
-  var sostenibilidadMP = calcularIndiceSostenibilidad(indicadoresMP);
-  var sostenibilidadIN = calcularIndiceSostenibilidad(indicadoresIN);
-  
-  print('Índice de Sostenibilidad - Materia Prima:');
-  print('  Económico:', sostenibilidadMP.economico.toFixed(3));
-  print('  Social:', sostenibilidadMP.social.toFixed(3));
-  print('  Ambiental:', sostenibilidadMP.ambiental.toFixed(3));
-  print('  Tecnológico:', sostenibilidadMP.tecnologico.toFixed(3));
-  print('  TOTAL:', sostenibilidadMP.total.toFixed(3));
-  
-  print('\nÍndice de Sostenibilidad - Industrialización:');
-  print('  Económico:', sostenibilidadIN.economico.toFixed(3));
-  print('  Social:', sostenibilidadIN.social.toFixed(3));
-  print('  Ambiental:', sostenibilidadIN.ambiental.toFixed(3));
-  print('  Tecnológico:', sostenibilidadIN.tecnologico.toFixed(3));
-  print('  TOTAL:', sostenibilidadIN.total.toFixed(3));
-  
-  // 15. RECOMENDACIONES ESTRATÉGICAS
-  // ====================================================================
-  
-  print('\n=== RECOMENDACIONES ESTRATÉGICAS ===\n');
-  
-  var diferencia = sostenibilidadIN.total - sostenibilidadMP.total;
-  
-  if (diferencia > 0.15) {
-    print('RECOMENDACIÓN: Implementar estrategia de industrialización completa');
-    print('• Ventaja en sostenibilidad: ' + (diferencia * 100).toFixed(1) + '%');
-    print('• Beneficio económico adicional: ' + 
-          ((indicadoresIN.gananciaTotal/indicadoresMP.gananciaTotal - 1)*100).toFixed(1) + '%');
-    print('• Creación adicional de empleos: ' + 
-          Math.round(indicadoresIN.empleosTotales - indicadoresMP.empleosTotales));
-  } else if (diferencia > 0.05) {
-    print('RECOMENDACIÓN: Transición gradual hacia industrialización');
-    print('• Implementar en fases de 3-5 años');
-    print('• Desarrollar capacidades técnicas locales primero');
-  } else {
-    print('RECOMENDACIÓN: Optimizar producción actual antes de industrializar');
-    print('• Mejorar eficiencia de extracción');
-    print('• Reducir impacto ambiental');
-  }
-  
-  // 16. CONTRIBUCIÓN A OBJETIVOS DE DESARROLLO SOSTENIBLE
-  // ====================================================================
-  
-  print('\n=== CONTRIBUCIÓN A LOS ODS ===\n');
-  
-  var contribucionODS = [
-    ['ODS 7: Energía asequible', 'Alta', 'Muy Alta'],
-    ['ODS 8: Trabajo decente', 'Media', 'Alta'],
-    ['ODS 9: Industria e innovación', 'Baja', 'Muy Alta'],
-    ['ODS 12: Producción responsable', 'Media', 'Alta'],
-    ['ODS 13: Acción climática', 'Media', 'Alta']
-  ];
-  
-  print('Contribución estimada a los ODS:');
-  print(ui.Chart({
-    chartType: 'Table',
-    data: contribucionODS
-  }));
-  
-  // 17. RESUMEN EJECUTIVO
-  // ====================================================================
-  
-  print('\n=== RESUMEN EJECUTIVO ===\n');
-  
-  print('1. CONDICIONES AMBIENTALES:');
-  print('   • NDWI promedio: ' + factorNDWI.toFixed(3) + ' (indicador de disponibilidad de salmueras)');
-  print('   • Temperatura promedio: ' + (factorTemperatura * 35).toFixed(1) + '°C');
-  print('   • Condiciones favorables para evaporación solar');
-  
-  print('\n2. POTENCIAL PRODUCTIVO (10 años):');
-  print('   • Materia Prima: ' + (indicadoresMP.litioTotal / 1000).toFixed(0) + ' mil toneladas de Li');
-  print('   • Industrialización: ' + (indicadoresIN.litioTotal / 1000).toFixed(0) + ' mil toneladas de Li');
-  
-  print('\n3. IMPACTOS ECONÓMICOS:');
-  print('   • Valor agregado industrialización: ' + 
-        ((indicadoresIN.gananciaTotal/indicadoresMP.gananciaTotal - 1)*100).toFixed(0) + '% mayor');
-  print('   • Renta tecnológica: ' + 
-        indicadoresIN.rentaTecnologicaPromedio.toFixed(1) + ' vs ' + 
-        indicadoresMP.rentaTecnologicaPromedio.toFixed(1));
-  
-  print('\n4. RECOMENDACIÓN PRINCIPAL:');
-  if (sostenibilidadIN.total > sostenibilidadMP.total + 0.1) {
-    print('   PRIORIZAR INDUSTRIALIZACIÓN LOCAL');
-    print('   • Mayor sostenibilidad integral');
-    print('   • Desarrollo tecnológico local');
-    print('   • Generación de empleo cualificado');
-  } else {
-    print('   OPTIMIZAR CADENA DE VALOR ACTUAL');
-    print('   • Mejorar eficiencia operativa');
-    print('   • Reducir impactos ambientales');
-    print('   • Preparar transición futura');
-  }
-  
-  print('\n=== ANÁLISIS COMPLETADO ===\n');
-  print('Este análisis integra datos satelitales con modelos dinámicos');
-  print('para apoyar decisiones estratégicas en la industrialización del litio.');
+  return sostenibilidad;
 }
 
-// 18. FUNCIÓN PARA CREAR SERIES TEMPORALES (OPCIONAL)
+var sostenibilidadMP = calcularSostenibilidad(indicadoresMP);
+var sostenibilidadIN = calcularSostenibilidad(indicadoresIN);
+
+print('Índice de Sostenibilidad - Materia Prima:');
+print('  Económica: ' + sostenibilidadMP.economica.toFixed(3));
+print('  Social: ' + sostenibilidadMP.social.toFixed(3));
+print('  Ambiental: ' + sostenibilidadMP.ambiental.toFixed(3));
+print('  Tecnológica: ' + sostenibilidadMP.tecnologica.toFixed(3));
+print('  TOTAL: ' + sostenibilidadMP.total.toFixed(3));
+
+print('\nÍndice de Sostenibilidad - Industrialización:');
+print('  Económica: ' + sostenibilidadIN.economica.toFixed(3));
+print('  Social: ' + sostenibilidadIN.social.toFixed(3));
+print('  Ambiental: ' + sostenibilidadIN.ambiental.toFixed(3));
+print('  Tecnológica: ' + sostenibilidadIN.tecnologica.toFixed(3));
+print('  TOTAL: ' + sostenibilidadIN.total.toFixed(3));
+
+// 15. RECOMENDACIONES DE POLÍTICA PÚBLICA
 // ====================================================================
 
-print('\nGenerando series temporales...');
+print('\n=== RECOMENDACIONES ESTRATÉGICAS ===\n');
 
-// Crear serie temporal de NDWI mensual (simplificada)
-var ndwiMensual = landsatConNDWI.select('NDWI')
-  .filterDate('2020-01-01', '2023-12-31');
+// Análisis comparativo
+var ventajaIndustrializacion = sostenibilidadIN.total - sostenibilidadMP.total;
 
-var chartSerieNDWI = ui.Chart.image.series({
-  imageCollection: ndwiMensual,
+if (ventajaIndustrializacion > 0.1) {
+  print('RECOMENDACIÓN PRINCIPAL: Avanzar con estrategia de industrialización');
+  print('• Justificación: Mayor valor agregado y renta tecnológica');
+  print('• Beneficios esperados:');
+  if (sostenibilidadMP.economica > 0) {
+    print('  - Incremento del ' + ((sostenibilidadIN.economica/sostenibilidadMP.economica - 1)*100).toFixed(0) + '% en sostenibilidad económica');
+  }
+  if (sostenibilidadMP.social > 0) {
+    print('  - Incremento del ' + ((sostenibilidadIN.social/sostenibilidadMP.social - 1)*100).toFixed(0) + '% en sostenibilidad social');
+  }
+  if (sostenibilidadMP.tecnologica > 0) {
+    print('  - Incremento del ' + ((sostenibilidadIN.tecnologica/sostenibilidadMP.tecnologica - 1)*100).toFixed(0) + '% en renta tecnológica');
+  }
+} else if (ventajaIndustrializacion > 0) {
+  print('RECOMENDACIÓN: Transición gradual hacia industrialización');
+  print('• Implementar en fases para mitigar riesgos');
+  print('• Desarrollar capacidades técnicas locales primero');
+} else {
+  print('RECOMENDACIÓN: Optimizar extracción antes de industrializar');
+  print('• Mejorar eficiencia en procesos de extracción');
+  print('• Reducir impacto ambiental actual');
+}
+
+// 16. RELACIÓN CON OBJETIVOS DE DESARROLLO SOSTENIBLE (ODS)
+// ====================================================================
+
+print('\n=== CONTRIBUCION A LOS ODS ===\n');
+
+print('ODS 7 - Energía asequible y no contaminante:');
+print('• Producción de baterías para energías renovables');
+
+print('\nODS 8 - Trabajo decente y crecimiento económico:');
+print('• Generación de empleo: ' + Math.round(indicadoresIN.empleosTotales) + ' empleos estimados');
+print('• Desarrollo económico local');
+
+print('\nODS 9 - Industria, innovación e infraestructura:');
+print('• Índice de renta tecnológica: ' + indicadoresIN.rentaTecnologicaPromedio.toFixed(2));
+print('• Transferencia tecnológica');
+
+print('\nODS 12 - Producción y consumo responsables:');
+print('• Consumo de agua: ' + (indicadoresIN.litioTotal * 500 / 1000).toFixed(0) + ' millones de m³');
+print('• Emisiones CO2: ' + (indicadoresIN.litioTotal * 8 / 1000).toFixed(0) + ' mil toneladas');
+
+print('\nODS 13 - Acción por el clima:');
+print('• Contribución a movilidad eléctrica');
+print('• Reducción de huella de carbono en cadena de valor');
+
+// 17. EXPORTACIÓN DE RESULTADOS (OPCIONAL)
+// ====================================================================
+
+print('\n=== EXPORTACIÓN DE RESULTADOS ===\n');
+
+// Exportar imagen de NDWI
+Export.image.toDrive({
+  image: ndwiPromedio,
+  description: 'NDWI_SalarUyuni',
+  scale: 100,
   region: salarUyuni,
-  reducer: ee.Reducer.mean(),
-  scale: 100
-}).setOptions({
-  title: 'Serie Temporal NDWI - Salar de Uyuni',
-  vAxis: {title: 'NDWI'},
-  hAxis: {title: 'Fecha'},
-  lineWidth: 1,
-  pointSize: 2,
-  colors: ['blue']
+  maxPixels: 1e9,
+  fileFormat: 'GeoTIFF'
 });
 
-print(chartSerieNDWI);
+print('Proceso de exportación configurado.');
+print('Para ejecutar las exportaciones, ve a la pestaña "Tasks" y haz clic en "Run".');
 
-// 19. INFORMACIÓN INICIAL
+// 18. MENSAJE FINAL
 // ====================================================================
 
-print('\n' + '='.repeat(60));
-print('SISTEMA DE ANÁLISIS DE INDUSTRIALIZACIÓN DEL LITIO');
-print('SALAR DE UYUNI, BOLIVIA');
-print('='.repeat(60));
+print('\n=== ANÁLISIS COMPLETADO ===\n');
 print('Este análisis integra:');
-print('• Datos satelitales Landsat 8 y MODIS');
-print('• Modelo dinámico de producción de litio');
-print('• Evaluación de sostenibilidad (ODS 7,8,9,12,13)');
-print('• Análisis económico-ambiental comparativo');
-print('='.repeat(60));
+print('1. Datos satelitales reales (Sentinel-2, MODIS)');
+print('2. Variables ambientales clave para producción de litio');
+print('3. Modelo dinámico de ecuaciones en diferencias');
+print('4. Simulación de escenarios de industrialización');
+print('5. Evaluación de sostenibilidad y ODS');
+print('\nLos resultados proporcionan base científica para decisiones estratégicas.');
 
-// 20. INSTRUCCIONES DE USO
 // ====================================================================
-
-print('\nINSTRUCCIONES:');
-print('1. Espere a que se carguen todas las capas en el mapa');
-print('2. Revise los valores ambientales extraídos');
-print('3. Analice los resultados de la simulación');
-print('4. Considere las recomendaciones estratégicas');
-print('\nLos resultados son indicativos y deben validarse con datos de campo.');
+// FIN DEL CÓDIGO
+// ====================================================================
