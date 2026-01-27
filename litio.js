@@ -7,7 +7,7 @@
 // ====================================================================
 
 // Definir área de estudio: Salar de Uyuni, Bolivia
-var salarUyuni = ee.Geometry.Rectangle([-68.5, -21.0, -66.5, -19.5]);
+var salarUyuni = ee.FeatureCollection('projects/eddycc66/assets/area111111');
 
 // Centrar mapa en el área de estudio
 Map.centerObject(salarUyuni, 9);
